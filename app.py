@@ -845,21 +845,17 @@ def export_into_original_workbook_bytes(
     deliv_acc = np.cumsum(deliv_tot).astype(int).tolist()
     diff_tot = (np.array(planned_tot) - np.array(deliv_tot)).astype(int).tolist()
 
-    write_row("TOTAL_PLAN", planned_tot, start_row)
-    write_row("ACCUM_PLAN", plan_acc, start_row + 1)
-    write_row("TOTAL_DELIV", deliv_tot, start_row + 2)
-    write_row("ACCUM_DELIV", deliv_acc, start_row + 3)
-    write_row("DIFF_PLAN_MINUS_DELIV", diff_tot, start_row + 4)
+    write_row("PLAN_TOTAL", planned_tot, start_row)
+    write_row("PLAN_ACCUMULADO", plan_acc, start_row + 1)
+    write_row("ENTREGAS_TOTAL", deliv_tot, start_row + 2)
+    write_row("ENTREGAS_ACCUMULADO", deliv_acc, start_row + 3)
+    write_row("PLAN_MENOS_ENTREGAS", diff_tot, start_row + 4)
 
     # Municipality summary (count + list)
     mun_list = selected_muns.sort_values(["coddep", "codmun"])["municipio_norm"].astype(str).tolist()
-    ws1.cell(start_row + 6, 1).value = "MUNICIPALITIES_COUNT"
+    ws1.cell(start_row + 6, 1).value = "CONTEO_MUNICIPIOS"
     ws1.cell(start_row + 6, 1).font = Font(bold=True)
     ws1.cell(start_row + 6, 2).value = int(len(mun_list))
-
-    ws1.cell(start_row + 7, 1).value = "MUNICIPALITIES_LIST"
-    ws1.cell(start_row + 7, 1).font = Font(bold=True)
-    ws1.cell(start_row + 7, 2).value = ", ".join(mun_list)
 
     # Optional: color planned cells in Sheet1 by Frente (for easier scan)
     frente_colors = build_frente_color_map(frontes)
@@ -907,10 +903,18 @@ def export_into_original_workbook_bytes(
 # Streamlit App
 # ----------------------------
 st.set_page_config(page_title="Planificador Pisos", layout="wide")
-st.title("Planificador Pisos")
+col2, col1 = st.columns([1, 2])
 
-CATALOG_PATH = "municipalidades_listado.json"
-EXCEL_DEFAULT_PATH = "default.xlsx"
+with col1:
+    st.image("assets/poweredBy.png", width=180)
+
+with col2:
+    st.title("Planificador Pisos")
+
+
+
+CATALOG_PATH = "data/municipalidades_listado.json"
+EXCEL_DEFAULT_PATH = "data/default.xlsx"
 
 mun_df = load_municipios(CATALOG_PATH)
 
