@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 import pulp
 import openpyxl
+import pydeck as pdk
 from openpyxl.styles import PatternFill, Font
 
 
@@ -34,6 +35,56 @@ def clamp_int(x, default=0, minv=0):
         return max(minv, xi)
     except Exception:
         return default
+
+def codmun_to_int(x):
+    """
+    codmun viene como string en properties. Convierte a int de forma robusta.
+    Soporta: "0101", "101", "101.0", "101 "...
+    """
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "":
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def hex_to_rgb(hex_color: str):
+    h = hex_color.lstrip("#")
+    return [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)]
+
+
+def geojson_bounds(gj: dict):
+    """
+    Retorna bounds (minx, miny, maxx, maxy) asumiendo coords en lon/lat (WGS84).
+    """
+    xs, ys = [], []
+
+    def visit_coords(coords):
+        if coords is None:
+            return
+        if isinstance(coords, (list, tuple)) and len(coords) == 0:
+            return
+        # base case: [lon, lat]
+        if isinstance(coords, (list, tuple)) and len(coords) >= 2 and isinstance(coords[0], (int, float)):
+            xs.append(coords[0])
+            ys.append(coords[1])
+            return
+        # recursive case
+        if isinstance(coords, (list, tuple)):
+            for c in coords:
+                visit_coords(c)
+
+    for f in gj.get("features", []):
+        geom = f.get("geometry") or {}
+        visit_coords(geom.get("coordinates"))
+
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def normalize_weights(weights: np.ndarray) -> np.ndarray:
@@ -72,6 +123,15 @@ def excel_month_cols(df: pd.DataFrame) -> Dict[int, str]:
                     colmap[i] = c
                     break
     return colmap
+
+def to_proper_case(s: str):
+    """
+    Convierte 'SAN JUAN SACATEPEQUEZ' -> 'San Juan Sacatepéquez'
+    (no corrige acentos, solo capitaliza correctamente)
+    """
+    if s is None:
+        return ""
+    return str(s).strip().lower().title()
 
 
 def _ensure_workbook_in_state(excel_bytes: bytes, filename: str):
@@ -1193,6 +1253,155 @@ st.markdown("---")
 # 5) Summaries
 # ----------------------------
 st.subheader("5) Resumenes")
+
+st.markdown("---")
+st.subheader("Mapa mensual de instalación (por municipio)")
+
+geojson_obj = None
+
+with open("data/municipalidades.json", "r", encoding="utf-8") as f:
+    geojson_obj = json.load(f)
+
+
+if geojson_obj is None:
+    st.info("")
+else:
+    # -------- Selector de mes + navegación rápida --------
+    if "map_month_idx" not in st.session_state:
+        st.session_state.map_month_idx = 0
+
+    cnav1, cnav2, cnav3, cnav4 = st.columns([1, 1, 2, 2])
+    with cnav1:
+        if st.button("⏮️ Mes anterior", key="map_prev_month"):
+            st.session_state.map_month_idx = (st.session_state.map_month_idx - 1) % 12
+            st.rerun()
+    with cnav2:
+        if st.button("▶️ Mes siguiente", key="map_next_month"):
+            st.session_state.map_month_idx = (st.session_state.map_month_idx + 1) % 12
+            st.rerun()
+
+    with cnav3:
+        month_name = st.selectbox("Mes", MONTHS_ES, index=st.session_state.map_month_idx, key="map_month_select")
+        st.session_state.map_month_idx = ES_TO_IDX[month_name]
+
+    with cnav4:
+        show_only_active = st.checkbox("Resaltar solo municipios con plan > 0", value=False)
+
+    t = st.session_state.map_month_idx
+
+    # -------- Computar planned/delivered/finished del mes t --------
+    selected_codmun_list = sorted(list(st.session_state.selected_codmun))
+
+    planned_by_mun = {}
+    delivered_by_mun = {}
+    finished_by_mun = {}
+
+    for codmun in selected_codmun_list:
+        codmun = int(codmun)
+        delivered_by_mun[codmun] = int(st.session_state.delivered.get((codmun, t), 0))
+        finished_by_mun[codmun] = bool(st.session_state.finished.get((codmun, t), False))
+
+        if finished_by_mun[codmun]:
+            planned_by_mun[codmun] = int(st.session_state.planned_locked.get((codmun, t), 0))
+        else:
+            planned_by_mun[codmun] = int(st.session_state.planned_current.get((codmun, t), 0))
+
+    max_planned = max(planned_by_mun.values()) if planned_by_mun else 1
+
+    # colores por frente (ya tienes build_frente_color_map en tu app)
+    frente_colors_hex = build_frente_color_map(st.session_state.frontes)
+
+    # -------- Enriquecer GeoJSON con props calculadas --------
+    for feat in geojson_obj.get("features", []):
+        props = feat.get("properties", {}) or {}
+
+        # codmun viene como string
+        codmun = codmun_to_int(props.get("codmun"))
+        props["codmun"] = codmun
+
+        # nombre del municipio viene en NAME (todo mayúsculas)
+        raw_name = props.get("NAME", "")
+        municipio_name = to_proper_case(raw_name)
+        props["municipio"] = municipio_name
+
+        if codmun is not None and codmun in planned_by_mun:
+            frente = str(st.session_state.frontes.get(codmun, "") or "").strip()
+            base_hex = frente_colors_hex.get(frente, "#FFFFFF")
+            rgb = hex_to_rgb(base_hex)
+
+            planned = int(planned_by_mun[codmun])
+            delivered = int(delivered_by_mun[codmun])
+            fin = bool(finished_by_mun[codmun])
+
+            # alpha proporcional al planned
+            alpha = 40 + int(180 * (planned / max(1, max_planned)))  # 40..220
+            alpha = max(30, min(220, alpha))
+
+            # si el usuario quiere resaltar solo activos, baja alpha cuando planned=0
+            if show_only_active and planned == 0:
+                alpha = 15
+
+            props["frente"] = frente
+            props["planned"] = planned
+            props["delivered"] = delivered
+            props["finished"] = fin
+            props["_fill_color"] = rgb + [alpha]
+            props["_line_color"] = [40, 40, 40, 180]
+        else:
+            # municipio fuera de selección o sin codmun válido
+            props["frente"] = ""
+            props["planned"] = 0
+            props["delivered"] = 0
+            props["finished"] = False
+            props["_fill_color"] = [200, 200, 200, 10]
+            props["_line_color"] = [120, 120, 120, 40]
+
+        feat["properties"] = props
+
+    # -------- Centrar mapa automáticamente al GeoJSON --------
+    b = geojson_bounds(geojson_obj)
+    if b:
+        minx, miny, maxx, maxy = b
+        cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
+        view_state = pdk.ViewState(latitude=cy, longitude=cx, zoom=7)
+    else:
+        # fallback Guatemala
+        view_state = pdk.ViewState(latitude=15.6, longitude=-90.2, zoom=7)
+
+    # -------- Capa y tooltip --------
+    geo_layer = pdk.Layer(
+        "GeoJsonLayer",
+        data=geojson_obj,
+        stroked=True,
+        filled=True,
+        get_fill_color="properties._fill_color",
+        get_line_color="properties._line_color",
+        line_width_min_pixels=1,
+        pickable=True,
+        auto_highlight=True,
+    )
+
+    tooltip = {
+        "html": """
+        <b>Municipio:</b> {properties.municipio}<br/>
+        <b>Codmun:</b> {properties.codmun}<br/>
+        <b>Frente:</b> {properties.frente}<br/>
+        <b>Planeado:</b> {properties.planned}<br/>
+        <b>Entregado:</b> {properties.delivered}<br/>
+        <b>Finalizado:</b> {properties.finished}
+        """,
+        "style": {"backgroundColor": "white", "color": "black"},
+    }
+
+    # IMPORTANTE: sin map_style para no requerir token de Mapbox
+    deck = pdk.Deck(
+        layers=[geo_layer],
+        initial_view_state=view_state,
+        tooltip=tooltip,
+    )
+
+    st.pydeck_chart(deck, use_container_width=True)
+
 
 col1, col2 = st.columns(2)
 
