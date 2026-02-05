@@ -910,7 +910,7 @@ st.set_page_config(page_title="Planificador Pisos", layout="wide")
 st.title("Planificador Pisos")
 
 CATALOG_PATH = "municipalidades_listado.json"
-EXCEL_DEFAULT_PATH = "mds_mano_a_mano_planificacion.xlsx"
+EXCEL_DEFAULT_PATH = "default.xlsx"
 
 mun_df = load_municipios(CATALOG_PATH)
 
